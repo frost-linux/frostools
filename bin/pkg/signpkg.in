@@ -1,0 +1,46 @@
+#!/bin/bash
+#
+# Copyright (C) 2018-19 artoo@artixlinux.org
+# Copyright (C) 2018 Artix Linux Developers
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+. @libdir@/frostools/util-pkg.sh
+
+prepare_frostools
+
+load_makepkg_config
+
+passfiles="$@"
+
+sign_pkg(){
+    local file_to_sign="$1"
+
+    if [ ! -e "$file_to_sign" ]; then
+        error "%s does not exist!" "$file_to_sign"
+        exit 1
+    fi
+
+    if [[ -n "${BUILDBOT_GPGP}" ]]; then
+        msg "Signing [%s]" "${file_to_sign##*/}"
+        gpg --batch --passphrase "${BUILDBOT_GPGP}" --detach-sign "$file_to_sign"
+    else
+        msg2 "Signing [%s] with key %s" "${file_to_sign##*/}" "${GPGKEY}..."
+        gpg --detach-sign --use-agent -u "${GPGKEY}" "$file_to_sign"
+    fi
+}
+
+for pkg in ${passfiles[@]}; do
+    if pkgfile=$(find_cached_pkgfile "$pkg");then
+        msg2 "Found: %s" "${pkgfile}"
+        [[ -e "${pkgfile}".sig ]] && rm "${pkgfile}".sig
+        sign_pkg "${pkgfile}"
+    fi
+done

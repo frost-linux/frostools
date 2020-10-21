@@ -1,0 +1,98 @@
+#!/bin/bash
+#
+# Copyright (C) 2018-19 artoo@artixlinux.org
+# Copyright (C) 2018 Artix Linux Developers
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+. @libdir@/frostools/util-pkg.sh
+
+prepare_frostools
+
+add(){
+    pkg=${pkgname%.*}
+    for ext in zst xz;do
+        if pkgfile=$(find_cached_pkgfile "$pkg.$ext");then
+            msg "Found: %s" "${pkgfile}"
+            packages+=("$pkg.$ext")
+            action='add'
+            ln -sf "${pkgfile}"{,.sig} "$repo_path"/
+        fi
+    done
+}
+
+remove(){
+    packages+=("$pkgname")
+    action='remove'
+    rm "$repo_path"/"$pkgname"*pkg.tar*
+}
+
+repo_action(){
+    local packages=() action= func="$1"
+    for pkgname in ${passfiles[@]}; do
+        "$func"
+    done
+    cd $repo_path
+    if [[ -n "$action" ]]; then
+        repo-"$action" -R "${dest_repo}"."${PKGDBEXT}" "${packages[@]}"
+        ${linksdb} && links-"$action" "${dest_repo}"."${LINKSDBEXT}" "${packages[@]}"
+    fi
+}
+
+load_makepkg_config
+
+add_pkg=false
+rm_pkg=false
+linksdb=false
+
+cmd=${0##*/}
+dest_repo=${cmd#*-}
+
+usage() {
+    echo "Usage: ${cmd} [options]"
+    echo '    -d <dest>          Destination repository'
+    echo '    -a                 Add package(s) to repository'
+    echo '    -r                 Remove package(s) from repository'
+    echo '    -l                 Use links db'
+    echo '    -h                 This help'
+    echo ''
+    echo ''
+    exit $1
+}
+
+opts='arlhd:'
+
+while getopts "${opts}" arg; do
+    case "${arg}" in
+        d) dest_repo="$OPTARG" ;;
+        a) add_pkg=true; rm_pkg=false ;;
+        r) rm_pkg=true; add_pkg=false ;;
+        l) linksdb=true ;;
+        h|?) usage 0 ;;
+        *) echo "invalid argument '${arg}'"; usage 1 ;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+passfiles="$@"
+
+prepare_dir "${REPOS_ROOT}"
+
+repo_path=${REPOS_ROOT}/${dest_repo}/os/${CARCH}
+
+if [[ -n ${passfiles[@]} ]]; then
+    if ${add_pkg}; then
+        repo_action add
+    fi
+    if ${rm_pkg}; then
+        repo_action remove
+    fi
+fi

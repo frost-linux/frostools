@@ -1,0 +1,88 @@
+#!/bin/bash
+#
+# Copyright (C) 2018-19 artoo@artixlinux.org
+# Copyright (C) 2018 Artix Linux Developers
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+. @libdir@/frostools/util-base.sh
+
+for pkglib in ${LIBDIR}/pkg/*.sh; do
+    . $pkglib
+done
+
+load_pkg_config(){
+
+    local conf="$1/frostools-pkg.conf"
+
+    [[ -f "$conf" ]] || return 1
+
+    [[ -r "$conf" ]] && . "$conf"
+
+    DOMAIN='artixlinux.org'
+
+    GIT_DOMAIN="gitea.${DOMAIN}"
+
+    GIT_URL="https://${GIT_DOMAIN}"
+
+    GIT_TOKEN=${GIT_TOKEN:-''}
+
+    TREE_DIR_FROST=${TREE_DIR_FROST:-"${WORKSPACE_DIR}/frostlinux"}
+
+    FROST_TREE=(
+        packages community
+        packages-{gfx,gtk,media,net,qt5,xorg}
+    )
+
+    local dev_tree=(packages-{python,perl,java,ruby})
+
+    local init_tree=(packages-{openrc,runit,s6})
+
+    local desktop_tree=(
+        packages-{kf5,plasma,kde}
+        packages-{lxqt,gnome,cinnamon,mate,xfce,wm}
+    )
+
+    [[ -z ${TREE_NAMES_FROST[@]} ]] && \
+    TREE_NAMES_FROST=(
+        packages-kernel
+        "${init_tree[@]}"
+        "${dev_tree[@]}"
+        "${desktop_tree[@]}"
+        packages-devel
+        packages-lib32
+    )
+
+    FROST_TREE+=("${TREE_NAMES_FROST[@]}")
+
+    HOST_TREE_FROST=${HOST_TREE_FROST:-"gitea@${GIT_DOMAIN}:artixlinux"}
+
+    TREE_DIR_ARCH=${TREE_DIR_ARCH:-"${WORKSPACE_DIR}/archlinux"}
+
+    ARCH_TREE=(packages community)
+
+    HOST_TREE_ARCH=${HOST_TREE_ARCH:-'git://git.archlinux.org/svntogit'}
+
+    CHROOTS_PKG="${CHROOTS_DIR}/buildpkg"
+
+    REPOS_ROOT=${REPOS_ROOT:-"${WORKSPACE_DIR}/repos"}
+
+    REPOS_MIRROR=${REPOS_MIRROR:-'http://mirror1.artixlinux.org/repos'}
+
+    DBEXT=${DBEXT:-'xz'}
+
+    LINKSDBEXT=${LINKSDBEXT:-"links.tar.${DBEXT}"}
+
+    PKGDBEXT=${PKGDBEXT:-"db.tar.${DBEXT}"}
+
+    return 0
+}
+
+load_pkg_config "${USER_CONF_DIR}" || load_pkg_config "${SYSCONFDIR}"

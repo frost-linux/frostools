@@ -1,0 +1,195 @@
+#!/bin/bash
+#
+# Copyright (C) 2018-19 artoo@artixlinux.org
+# Copyright (C) 2018 Artix Linux Developers
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+. @libdir@/frostools/util-pkg.sh
+
+prepare_frostools
+
+prepare_commit(){
+    # create new layout, copy & remove repos
+    if [[ -d repos ]]; then
+        msg "Switching to new layout ..."
+        [[ ! -d "$CARCH" ]] && mkdir "$CARCH"
+
+        for r in $(ls repos); do
+            mkdir "$CARCH/${r%-*}"
+            cp repos/${r}/* $CARCH/${r%-*}/
+            git add $CARCH/${r%-*}
+        done
+
+        git rm -r repos
+        git commit -m "switch to new repo layout"
+        msg "Done switch"
+    fi
+
+    if [[ $action == 'add' ]] || [[ $action == 'move' ]] ;then
+        [[ -d "$CARCH/${REPO_DEST}" ]] && git rm -r "$CARCH/${REPO_DEST}"
+        [[ ! -d "$CARCH" ]] && mkdir "$CARCH"
+        [[ ! -d "$CARCH/${REPO_DEST}" ]] && mkdir "$CARCH/${REPO_DEST}"
+    fi
+}
+
+check_team(){
+    if [[ "${REPO_SRC}" == "core" && "${REPO_DEST}" == "extra" ]] || \
+        [[ "${REPO_SRC}" == "extra" && "${REPO_DEST}" == "core" ]] || \
+        [[ "${REPO_SRC}" == "extra" && "${REPO_DEST}" == "community" ]] || \
+        [[ "${REPO_SRC}" == "community" && "${REPO_DEST}" == "extra" ]] ;then
+
+        local org=$(get_pkg_org "${PACKAGE}")
+        add_repo_to_team "${PACKAGE}" "$org" "${REPO_DEST}"
+        remove_repo_from_team "${PACKAGE}" "$org" "${REPO_SRC}"
+    fi
+}
+
+config() {
+    [[ "${REPO_SRC}" != 'trunk' ]] && pkgbuild="$CARCH/${REPO_SRC}"/PKGBUILD
+
+    if [[ ! -f "$pkgbuild" ]]; then
+        pkgbuild=repos/"${REPO_SRC}-${CARCH}"/PKGBUILD
+        [[ -f repos/"${REPO_SRC}"-any/PKGBUILD ]] && pkgbuild=repos/"${REPO_SRC}"-any/PKGBUILD
+    fi
+}
+
+commit_pkg() {
+    if ${remove};then
+        action='remove'
+        if [[ "${REPO_SRC}" == 'trunk' ]];then
+            local pkg=${PACKAGE}
+            git rm -r trunk
+        else
+            local pkg="${PACKAGE}-$(get_full_version)"
+
+            prepare_commit
+
+            git rm -r "$CARCH/${REPO_SRC}"
+        fi
+        local commit_msg="[${REPO_SRC}] '$pkg' ${action}"
+        msg "Action: %s" "$commit_msg"
+    else
+        action='modify'
+        local commit_msg="[${REPO_SRC}] '${PACKAGE}-$(get_full_version)' ${action}"
+        msg "Action: %s" "$commit_msg"
+        git add .
+    fi
+    git commit -m "$commit_msg"
+}
+
+repo_commit_pkg() {
+    if [[ "${REPO_SRC}" == 'trunk' ]];then
+        action='add'
+        prepare_commit
+        cp trunk/* "$CARCH/${REPO_DEST}"/
+    else
+        action='move'
+        [[ ! -f $pkgbuild ]] && die "%s does not exist!" "$pkgbuild"
+
+        prepare_commit
+
+        cp "$CARCH/${REPO_SRC}"/* "$CARCH/${REPO_DEST}"/
+        git rm -r "$CARCH/${REPO_SRC}"
+    fi
+    local commit_msg="[${REPO_SRC}] -> [${REPO_DEST}] '${PACKAGE}-$(get_full_version)' ${action}"
+    msg "Action: %s" "$commit_msg"
+
+    git add .
+    git commit -m "$commit_msg"
+}
+
+run(){
+    local frostpath=$(find_pkg "${TREE_DIR_FROST}" "${PACKAGE}")
+    if [[ -n ${frostpath} ]];then
+        local group=${frostpath%/*}
+        cd ${group}
+        local head=$(get_local_head)
+
+        cd ${frostpath}
+        config
+        . $pkgbuild
+
+        if [[ "${cmd}" == 'commitpkg' ]];then
+            commit_pkg
+        else
+            repo_commit_pkg
+        fi
+
+        cd ${group}
+
+        ${push} && pull_tree "${group##*/}" "$head"
+#         subrepo_pull "${PACKAGE}"
+        subrepo_push "${PACKAGE}"
+        subrepo_clean "${PACKAGE}"
+
+        ${push} && push_tree "${group##*/}"
+
+        git prune
+
+        [[ "${cmd}" != 'commitpkg' ]] && check_team
+    else
+        die "Package '%s' does not exist!" "${PACKAGE}"
+    fi
+}
+
+is_valid_repo(){
+    case "${REPO_SRC}" in
+        core|extra|community|multilib|testing|community-testing|multilib-testing|staging|community-staging|multilib-staging|gnome-unstable|kde-unstable|trunk) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+load_makepkg_config
+
+REPO_SRC='trunk'
+PACKAGE=''
+remove=false
+push=false
+
+pkgbuild=trunk/PKGBUILD
+
+cmd=${0##*/}
+REPO_DEST=${cmd%pkg}
+
+usage() {
+    echo "Usage: ${0##*/} [options]"
+    echo "    -s <name>          Source repository [default:${REPO_SRC}]"
+    echo '    -p <pkg>           Package name'
+    echo '    -r                 Delete from repo (commitpkg only)'
+    echo '    -u                 Push'
+    echo '    -h                 This help'
+    echo ''
+    echo ''
+    exit $1
+}
+
+orig_argv=("$0" "$@")
+
+opts='p:s:urh'
+
+while getopts "${opts}" arg; do
+    case "${arg}" in
+        s) REPO_SRC="$OPTARG" ;;
+        p) PACKAGE="$OPTARG" ;;
+        r) remove=true ;;
+        u) push=true ;;
+        h|?) usage 0 ;;
+        *) echo "invalid argument '${arg}'"; usage 1 ;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+if $(is_valid_repo);then
+    run
+else
+    die "source repository '%s' is not valid!" "${REPO_SRC}"
+fi

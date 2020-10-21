@@ -1,0 +1,8 @@
+*~
+*.tar.gz
+*.tar.xz
+.kateproject.d
+data/schemas/*.conf
+.project
+iso-profiles
+live-services

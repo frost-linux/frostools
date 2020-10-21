@@ -1,0 +1,122 @@
+#!/bin/bash
+#
+# Copyright (C) 2018-19 artoo@artixlinux.org
+# Copyright (C) 2018 Artix Linux Developers
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+. @libdir@/frostools/util-pkg.sh
+
+prepare_frostools
+
+create_first=false
+rebuild=false
+no_check=false
+is_checkpkg=false
+
+mkchrootpkg_args=(-c -n)
+
+cmd=${0##*/}
+repo=${cmd#*-}
+base_devel=('base-devel')
+
+usage() {
+    echo "Usage: ${0##*/} [options] -- [mkchrootpkg_args]"
+    echo "    -r <dir>           Create chroots in this directory"
+    echo "    -d <dir>           Destination repo chroot"
+    echo '    -c                 Recreate the chroot before building'
+    echo '    -m                 Major rebuild'
+    echo '    -N                 Disable check() function'
+    echo '    -C                 Run checkpkg after built'
+    echo '    -h                 This help'
+    echo ''
+    echo "Default mkchrootpkg_args args: ${mkchrootpkg_args[*]}"
+    echo ''
+    exit $1
+}
+
+orig_argv=("$0" "$@")
+
+opts='hcCNmr:d:'
+
+while getopts "${opts}" arg; do
+    case "${arg}" in
+        r) CHROOTS_PKG="$OPTARG" ;;
+        d) repo="$OPTARG" ;;
+        c) create_first=true ;;
+        m) rebuild=true ;;
+        C) is_checkpkg=true; mkchrootpkg_args+=(-C) ;;
+        N) no_check=true; mkchrootpkg_args+=(-N) ;;
+        h|?) usage 0 ;;
+        *) echo "invalid argument '%s'" "${arg}"; usage 1 ;;
+    esac
+done
+
+if ${rebuild};then
+    repo='default'
+else
+    case ${repo} in
+        system|world|galaxy) repo='default' ;;
+        lib32*) base_devel+=('multilib-devel') ;;
+        galaxy-gremlins|galaxy-goblins) repo=${repo#*-} ;;
+    esac
+fi
+
+pacman_conf="${DATADIR}/pacman-${repo}.conf"
+[[ -f ${USER_CONF_DIR}/pacman-${repo}.conf ]] && pacman_conf="${USER_CONF_DIR}/pacman-${repo}.conf"
+
+makepkg_conf="${DATADIR}/makepkg.conf"
+[[ -f ${USER_CONF_DIR}/makepkg.conf ]] && makepkg_conf="${USER_CONF_DIR}/makepkg.conf"
+
+check_root SOURCE_DATE_EPOCH
+
+mkchrootpkg_args+=("${@:$OPTIND}")
+
+if ${create_first} || [[ ! -d "${CHROOTS_PKG}/${repo}-${ARCH}" ]];then
+    msg "Creating chroot for [%s] (%s)..." "${repo}" "${ARCH}"
+
+    for copy in "${CHROOTS_PKG}/${repo}-${ARCH}"/*; do
+        [[ -d $copy ]] || continue
+        msg2 "Deleting chroot copy '%s'..." "$(basename "${copy}")"
+
+        lock 9 "$copy.lock" "Locking chroot copy '%s'" "$copy"
+
+        subvolume_delete_recursive "${copy}"
+        rm -rf --one-file-system "${copy}"
+    done
+    lock_close 9
+
+    rm -rf --one-file-system "${CHROOTS_PKG}/${repo}-${ARCH}"
+    (umask 0022; mkdir -p "${CHROOTS_PKG}/${repo}-${ARCH}")
+    setarch "${ARCH}" mkchroot \
+        -C "${pacman_conf}" \
+        -M "${makepkg_conf}" \
+        "${CHROOTS_PKG}/${repo}-${ARCH}/root" \
+        "${base_devel[@]}" || abort
+else
+    lock 9 "${CHROOTS_PKG}/${repo}-${ARCH}/root.lock" "Locking clean chroot"
+    chroot-run \
+        -C "${pacman_conf}" \
+        -M "${makepkg_conf}" \
+        "${CHROOTS_PKG}/${repo}-${ARCH}/root" \
+        pacman -Syuu --noconfirm || abort
+fi
+
+# Always build official packages reproducibly
+if [[ ! -v SOURCE_DATE_EPOCH ]]; then
+    export SOURCE_DATE_EPOCH=$(date +%s)
+fi
+
+timer_start=$(get_timer)
+
+msg "Building in chroot for [%s] (%s)..." "${repo}" "${ARCH}"
+exec mkchrootpkg -r "${CHROOTS_PKG}/${repo}-${ARCH}" "${mkchrootpkg_args[@]}"
+
+show_elapsed_time "${FUNCNAME}" "${timer_start}"

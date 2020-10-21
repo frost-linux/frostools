@@ -1,0 +1,267 @@
+#!/bin/bash
+#
+# Copyright (C) 2018-19 artoo@artixlinux.org
+# Copyright (C) 2018 Artix Linux Developers
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+. @libdir@/frostools/util-pkg.sh
+
+prepare_frostools
+
+patch_pkg(){
+    local pkgpath="$1"
+    local pkg=${pkgpath%/*}
+    pkg=${pkg##*/}
+    case $pkg in
+        glibc)
+            msg2 "Patching %s" "$pkg"
+            sed -e 's|{locale,systemd/system,tmpfiles.d}|{locale,tmpfiles.d}|' \
+                -e '/nscd.service/d' \
+                -i $pkgpath/PKGBUILD
+        ;;
+        linux|linux-lts)
+            msg2 "Patching %s" "$pkg"
+            sed -e 's|KBUILD_BUILD_HOST=.*|KBUILD_BUILD_HOST=frostlinux|' -i $pkgpath/PKGBUILD
+            sed -e 's|CONFIG_DEFAULT_HOSTNAME=.*|CONFIG_DEFAULT_HOSTNAME="frostlinux"|' \
+                -i $pkgpath/config
+        ;;
+        bash)
+            msg2 "Patching %s" "$pkg"
+            sed -e 's|system.bash_logout)|system.bash_logout frost.bashrc)|' \
+            -e "s|etc/bash.|etc/bash/|g" \
+            -e 's|"$pkgdir/etc/skel/.bash_logout"|"$pkgdir/etc/skel/.bash_logout"\n  install -Dm644 frost.bashrc $pkgdir/etc/bash/bashrc.d/frost.bashrc|' \
+            -i $pkgpath/PKGBUILD
+            cd $pkgpath
+                patch -Np 1 -i ${DATADIR}/patches/frost-bash.patch
+                updpkgsums
+            cd ../..
+        ;;
+        gstreamer|gst-plugins-*|licenses)
+            msg2 "Patching %s" "$pkg"
+            sed -e 's|https://www.archlinux.org/|https://www.frostlinux.xyz/|' \
+                -e 's|(Arch Linux)|(Frost Linux)|' \
+                -i $pkgpath/PKGBUILD
+        ;;
+    esac
+}
+
+pull_tree_arch(){
+    cd ${TREE_DIR_ARCH}
+    for tree in ${ARCH_TREE[@]};do
+        if [[ -d ${tree} ]];then
+            cd ${tree}
+            pull_tree "${tree}" "$(get_local_head)" "Arch"
+            cd ..
+        else
+            clone_tree "${HOST_TREE_ARCH}" "${tree}" "Arch"
+        fi
+    done
+}
+
+pull_tree_frost(){
+    local repos=("$1")
+    cd ${TREE_DIR_FROST}
+    for tree in ${repos[@]};do
+        if [[ -d ${tree} ]];then
+            config_tree "${tree}"
+            cd ${tree}
+            pull_tree "${tree}" "$(get_local_head)"
+            cd ..
+        else
+            clone_tree "${HOST_TREE_FROST}" "${tree}"
+            config_tree "${tree}"
+        fi
+    done
+}
+
+sync_pkg(){
+    local rsync_args=(-aWxvci --progress --delete-before --no-R --no-implied-dirs)
+    local src="$1" dest="$2"
+    msg "Sync from Arch [%s] to frost [%s]" "${src##*archlinux/}" "${dest##*frostlinux/}"
+    rsync "${rsync_args[@]}" $src/ $dest/
+}
+
+show_deps(){
+    local src="$1"
+
+    . $src/PKGBUILD 2>/dev/null
+
+    local archver=$(get_full_version)
+
+    [[ -n ${pkgbase} ]] && msg2 "pkgbase: %s" "${pkgbase}"
+    msg2 "pkgname: %s" "${pkgname[*]}"
+    [[ -n $pkgdesc ]] && msg2 "pkgdesc: %s" "${pkgdesc}"
+    msg2 "Arch Version: %s" "$archver"
+    msg2 "arch: %s" "$arch"
+
+    [[ -n ${makedepends[@]} ]] && msg2 "makedepends: %s" "${makedepends[*]}"
+    [[ -n ${checkdepends[@]} ]] && msg2 "checkdepends: %s" "${checkdepends[*]}"
+    [[ -n ${depends[@]} ]] && msg2 "depends: %s" "${depends[*]}"
+    [[ -n ${optdepends[@]} ]] && msg2 "optdepends: %s" "${optdepends[@]}"
+}
+
+subrepo_new(){
+    cd ${TREE_DIR_FROST}/${GROUP}
+
+    local org=$(get_pkg_org "${PACKAGE}")
+
+    create_repo "${PACKAGE}" "$org"
+
+    add_repo_to_team "${PACKAGE}" "$org" "${TEAM}"
+
+    subrepo_clone "${PACKAGE}" "$org"
+
+    prepare_dir "${TREE_DIR_FROST}/${GROUP}/${PACKAGE}/trunk"
+
+    commit_jenkins_files "${PACKAGE}"
+}
+
+from_arch(){
+    cd ${TREE_DIR_FROST}
+
+    local srcpath=$(find_pkg "${TREE_DIR_ARCH}" "${PACKAGE}")
+    [[ -z $srcpath ]] && die "Package '%s' does not exist!" "${PACKAGE}"
+
+    local repo=$(find_repo "$srcpath")
+    msg "repo: %s" "${repo#*/}"
+
+    local archpath=$srcpath/$repo
+    local frostpath=$(find_pkg "${TREE_DIR_FROST}" "${PACKAGE}")
+
+    show_deps "$archpath"
+
+    if [[ -f "$frostpath"/.gitrepo ]]; then
+        frostpath="$frostpath"/trunk
+
+        if [[ -d "$frostpath" ]];then
+            sync_pkg "$archpath" "$frostpath"
+            patch_pkg "$frostpath"
+        fi
+    else
+        die "Package '%s' does not exist!" "${PACKAGE}"
+    fi
+}
+
+view_build(){
+    local archpath=$(find_pkg "${TREE_DIR_ARCH}" "${PACKAGE}")
+    [[ -z $archpath ]] && die "Package '%s' does not exist!" "${PACKAGE}"
+    local repo=$(find_repo "${archpath}")
+    archpath=$archpath/$repo
+    msg "repo: %s" "${repo#*/}"
+    show_deps "$archpath"
+}
+
+check_tree(){
+    local archpath=$(find_pkg "${TREE_DIR_ARCH}" "${PACKAGE}")
+    [[ -z $archpath ]] && die "Package '%s' does not exist!" "${PACKAGE}"
+    local frostpath=$(find_pkg "${TREE_DIR_FROST}" "${PACKAGE}")
+    local group=${frostpath%/*}
+    msg "group: %s" "${group##*/}"
+
+    [[ -z $frostpath ]] && msg2 "exists: %s" "no"
+    [[ -n $frostpath ]] && msg2 "exists: %s" "yes"
+}
+
+sync_repos(){
+    ${sync_arch} && pull_tree_arch
+    if ${sync_frost};then
+        if ${sync_group}; then
+            pull_tree_frost "${GROUP}"
+        else
+            pull_tree_frost "${FROST_TREE[*]}"
+        fi
+    fi
+}
+
+load_makepkg_config
+
+testing=true
+staging=true
+unstable=false
+
+sync=false
+sync_arch=true
+sync_frost=true
+import=false
+view=false
+createnew=false
+sync_group=false
+check=false
+
+PACKAGE=''
+
+TEAM='community'
+GROUP=${FROST_TREE[0]}
+
+usage() {
+    echo "Usage: ${0##*/} [options]"
+    echo '    -p <pkg>      Package name'
+    echo '    -t <team>     Team name (only with -n)'
+    echo '                  Possible values: core,extra,community,multilib'
+    echo "                  [default: ${TEAM}]"
+    echo '    -g <group>    Group name, the superrepo (only with -n or -s)'
+    echo "                  [default: ${GROUP}]"
+    echo "    -s            Clone or pull repos"
+    echo "    -a            Don't clone or pull arch repos"
+    echo "    -b            Don't clone or pull frost repos"
+    echo '    -i            Import a package from arch repos'
+    echo '    -n            New remote subrepo and clone it'
+    echo '    -v            Check if a package is in the frost tree(s)'
+    echo '    -c            View package depends'
+    echo '    -x            Exclude testing (only with -i)'
+    echo '    -y            Exclude staging (only with -i)'
+    echo '    -z            Include kde & gnome unstable (only with -i)'
+    echo '    -h            This help'
+    echo ''
+    echo ''
+    exit $1
+}
+
+orig_argv=("$0" "$@")
+
+opts='p:t:g:sinabcvxyzh'
+
+while getopts "${opts}" arg; do
+    case "${arg}" in
+        p) PACKAGE="$OPTARG" ;;
+        t) TEAM="$OPTARG" ;;
+        g) GROUP="$OPTARG"; sync_group=true ;;
+        s) sync=true ;;
+        a) sync_arch=false ;;
+        b) sync_frost=false ;;
+        i) import=true ;;
+        n) createnew=true ;;
+        c) check=true ;;
+        v) view=true ;;
+        x) testing=false ;;
+        y) staging=false ;;
+        z) unstable=true ;;
+        h|?) usage 0 ;;
+        *) echo "invalid argument '${arg}'"; usage 1 ;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+prepare_dir "${TREE_DIR_FROST}"
+prepare_dir "${TREE_DIR_ARCH}"
+
+set_arch_repos "$testing" "$staging" "$unstable"
+
+${sync} && sync_repos
+
+${view} && view_build
+
+${check} && check_tree
+
+${import} && from_arch
+
+${createnew} && subrepo_new

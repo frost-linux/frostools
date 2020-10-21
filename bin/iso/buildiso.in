@@ -1,0 +1,245 @@
+#!/bin/bash
+#
+# Copyright (C) 2018-19 artoo@frostlinux.org
+# Copyright (C) 2018 frost Linux Developers
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+. @libdir@/frostools/util-iso.sh
+
+prepare_frostools
+
+gen_iso_fn(){
+    local vars=("frost") name
+    vars+=("${PROFILE}")
+    vars+=("${INITSYS}")
+    case "${REPOSITORY}" in
+        'gremlins'|'goblins') vars+=("${REPOSITORY}") ;;
+    esac
+    vars+=("${ISO_VERSION}")
+    vars+=("${ARCH}")
+    for n in ${vars[@]};do
+        name=${name:-}${name:+-}${n}
+    done
+    echo $name
+}
+
+prepare_build(){
+    timer_start=$(get_timer)
+
+    load_profile
+
+    local pacman_conf pac_file="pacman-default.conf"
+
+    case "${REPOSITORY}" in
+        'gremlins'|'goblins') pac_file="pacman-${REPOSITORY}.conf" ;;
+    esac
+
+    pacman_conf="${DATADIR}/$pac_file"
+    [[ -f ${USER_CONF_DIR}/$pac_file ]] && pacman_conf="${USER_CONF_DIR}/$pac_file"
+
+    iso_file=$(gen_iso_fn).iso
+
+    iso_label="FROST_$(date +%Y%m)"
+
+    basestrap_args+=(-C ${pacman_conf})
+    work_dir=${CHROOTS_ISO}/${PROFILE}/frost
+
+    prepare_dir "${ISO_POOL}"
+
+    iso_dir="${ISO_POOL}/${PROFILE}"
+
+    iso_root=${CHROOTS_ISO}/${PROFILE}/iso
+    live_dir=/LiveOS
+
+    mnt_dir=${CHROOTS_ISO}/${PROFILE}/mnt
+
+    prepare_dir "${mnt_dir}"
+    prepare_dir "${iso_dir}"
+    prepare_dir "${iso_root}"
+}
+
+display_settings(){
+    msg "OPTIONS:"
+    msg2 "PROFILE: %s" "${PROFILE}"
+    msg2 "INITSYS: %s" "${INITSYS}"
+    [[ -n ${GPG_KEY} ]] && msg2 "GPG_KEY: %s" "${GPG_KEY}"
+
+    msg "ISO SETTINGS:"
+    msg2 "ISO_VERSION: %s" "${ISO_VERSION}"
+
+    msg "BUILD:"
+    show_profile
+}
+
+mk_squash(){
+    local timer=$(get_timer)
+    make_sfs "${work_dir}/rootfs"
+    [[ -d "${work_dir}/livefs" ]] && make_sfs "${work_dir}/livefs"
+    show_elapsed_time "${FUNCNAME}" "${timer}"
+}
+
+mk_iso(){
+    touch "${iso_root}/.frost"
+    msg "Making bootable image"
+    # Sanity checks
+    [[ ! -d "${iso_root}" ]] && return 1
+    if [[ -f "${iso_dir}/${iso_file}" ]]; then
+        msg2 "Removing existing bootable image..."
+        rm -rf "${iso_dir}/${iso_file}"
+    fi
+    assemble_iso
+    chown -R "${OWNER}:$(id --group ${OWNER})" "${iso_dir}"
+}
+
+mk_boot(){
+    local timer=$(get_timer)
+    run_safe "make_bootfs"
+    run_safe "make_grub"
+    show_elapsed_time "${FUNCNAME}" "${timer}"
+}
+
+mk_chroots(){
+    local timer=$(get_timer)
+    load_pkgs "${ROOT_LIST}" "${INITSYS}"
+    run_safe "make_rootfs"
+    if [[ -n ${LIVE_LIST} ]]; then
+        load_pkgs "${LIVE_LIST}" "${INITSYS}"
+        run_safe "make_livefs"
+    fi
+    show_elapsed_time "${FUNCNAME}" "${timer}"
+}
+
+build(){
+    msg "Start building [%s]" "${PROFILE}"
+    if ${clean_first};then
+        for copy in "${work_dir}"/*; do
+            [[ -d $copy ]] || continue
+            msg2 "Deleting chroot copy '%s'..." "$(basename "${copy}")"
+
+            lock 9 "$copy.lock" "Locking chroot copy '%s'" "$copy"
+
+            subvolume_delete_recursive "${copy}"
+            rm -rf --one-file-system "${copy}"
+        done
+        lock_close 9
+
+        rm -rf --one-file-system "${work_dir}"
+
+        msg "Deleting isoroot [%s] ..." "${iso_root##*/}"
+        rm -rf --one-file-system "${iso_root}"
+    fi
+
+    case true in
+        ${chroot_only})
+            mk_chroots
+            warning "Continue squash: %s -p %s -sc ..." "${cmd}" "${PROFILE}"
+            exit 1
+        ;;
+        ${boot_only})
+            mk_boot
+            warning "Continue iso: %s -p %s -zc ..." "${cmd}" "${PROFILE}"
+            exit 1
+        ;;
+        ${squash_only})
+            mk_squash
+            warning "Continue boot: %s -p %s -bc ..." "${cmd}" "${PROFILE}"
+            exit 1
+        ;;
+        ${iso_only})
+            [[ ! -d ${work_dir} ]] && die "Create chroot: %s -p %s -x" "${cmd}" "${PROFILE}"
+            mk_iso
+        ;;
+        *)
+            mk_chroots
+            mk_boot
+            mk_squash
+            mk_iso
+        ;;
+    esac
+    msg "Finished building [%s]" "${PROFILE}"
+    show_elapsed_time "${FUNCNAME}" "${timer_start}"
+}
+
+clean_first=true
+pretend=false
+chroot_only=false
+iso_only=false
+persist=false
+use_dracut=false
+squash_only=false
+boot_only=false
+
+basestrap_args=(-GMc)
+cmd=${0##*/}
+
+REPOSITORY=${cmd##*-}
+
+usage() {
+    echo "Usage: ${cmd} [options]"
+    echo "    -p <profile>       Profile [default: ${PROFILE}]"
+    echo '    -r <dir>           Chroots directory'
+    echo "                       [default: ${CHROOTS_ISO}]"
+    echo '    -t <dir>           Target directory'
+    echo "                       [default: ${ISO_POOL}]"
+    echo '    -i <name>          Init system to use'
+    echo "                       [default: ${INITSYS}]"
+    echo '    -g <key>           The gpg key for img signing'
+    echo "                       [default: ${GPG_KEY}]"
+    echo '    -m                 Set SquashFS image mode to persistence'
+    echo '    -c                 Disable clean work dir'
+    echo '    -x                 Build chroot only'
+    echo '    -s                 Squash chroot only'
+    echo '    -b                 Generate iso boot only'
+    echo '    -z                 Generate iso only'
+    echo '                       Requires pre built images (-x)'
+    echo '    -d                 Use dracut instead of mkinitcpio for iso initramfs'
+    echo '    -q                 Query settings and pretend build'
+    echo '    -h                 This help'
+    echo ''
+    echo ''
+    exit $1
+}
+
+orig_argv=("$0" "$@")
+
+opts='p:r:t:i:g:czsbxmdqh'
+
+while getopts "${opts}" arg; do
+    case "${arg}" in
+        p) PROFILE="$OPTARG" ;;
+        r) CHROOTS_ISO="$OPTARG" ;;
+        t) ISO_POOL="$OPTARG" ;;
+        i) INITSYS="$OPTARG" ;;
+        g) GPG_KEY="$OPTARG" ;;
+        c) clean_first=false ;;
+        x) chroot_only=true ;;
+        z) iso_only=true ;;
+        s) squash_only=true ;;
+        b) boot_only=true ;;
+        m) persist=true ;;
+        d) use_dracut=true ;;
+        q) pretend=true ;;
+        h|?) usage 0 ;;
+        *) echo "invalid argument '${arg}'"; usage 1 ;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+check_root
+
+prepare_traps
+
+prepare_build
+
+${pretend} && display_settings && exit 1
+
+build
