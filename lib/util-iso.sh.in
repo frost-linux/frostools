@@ -12,7 +12,7 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 
-. @libdir@/artools/util-base.sh
+. @libdir@/frostools/util-base.sh
 
 for isolib in ${LIBDIR}/iso/*.sh; do
     . $isolib
@@ -20,7 +20,7 @@ done
 
 load_iso_config(){
 
-    local conf="$1/artools-iso.conf"
+    local conf="$1/frostools-iso.conf"
 
     [[ -f "$conf" ]] || return 1
 
